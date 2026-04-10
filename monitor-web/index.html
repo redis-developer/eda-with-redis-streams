@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BAM with Redis Streams</title>
+  <link rel="stylesheet" href="/styles.css?v=3">
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div>
+        <h1>Business Activity Monitoring with Redis Streams</h1>
+        <p class="subhead">
+          Recent transactions, derived alerts, and metrics-group health from the running demo.
+        </p>
+      </div>
+      <div class="status-pill">
+        <span class="dot" id="connection-dot"></span>
+        <span id="connection-label">Connecting</span>
+      </div>
+    </section>
+
+    <section class="stats-grid" id="stats-grid">
+      <article class="card stat-card">
+        <p class="label">Transactions Stream</p>
+        <p class="value" id="stream-transactions">0</p>
+      </article>
+      <article class="card stat-card">
+        <p class="label">Metrics Lag</p>
+        <p class="value" id="metrics-lag">0</p>
+      </article>
+      <article class="card stat-card">
+        <p class="label">Metrics Consumers</p>
+        <p class="value" id="metrics-consumers">0</p>
+      </article>
+    </section>
+
+    <section class="content-stack">
+      <article class="card transactions-card">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Source Stream</p>
+            <h2>Recent Transactions</h2>
+          </div>
+          <p class="stamp" id="generated-at">Waiting for first poll</p>
+        </div>
+
+        <div class="table-wrap">
+          <table class="transactions-table">
+            <thead>
+            <tr>
+              <th>State</th>
+              <th>Txn</th>
+              <th>Amount</th>
+              <th>Category</th>
+              <th>Region</th>
+              <th>Risk</th>
+            </tr>
+            </thead>
+            <tbody id="transactions-body">
+            <tr>
+              <td colspan="6" class="empty-row">Waiting for transaction data…</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
+
+      <section class="metrics-grid">
+        <article class="card">
+          <div class="section-head compact">
+            <div>
+              <p class="eyebrow">Materialized Metrics</p>
+              <h2>Volume by Category</h2>
+            </div>
+          </div>
+          <div class="metric-bars" id="category-bars">
+            <p class="empty-row">Waiting for category metrics…</p>
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="section-head compact">
+            <div>
+              <p class="eyebrow">Materialized Metrics</p>
+              <h2>Count by Region</h2>
+            </div>
+          </div>
+          <div class="region-grid" id="region-grid">
+            <p class="empty-row">Waiting for region metrics…</p>
+          </div>
+        </article>
+      </section>
+
+      <article class="card alerts-card">
+        <div class="section-head compact">
+          <div>
+            <p class="eyebrow">Derived Stream</p>
+            <h2>Recent Alerts</h2>
+          </div>
+        </div>
+        <div class="alerts-list" id="alerts-list">
+          <p class="empty-row">Waiting for alerts…</p>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <script src="/app.js?v=2"></script>
+</body>
+</html>

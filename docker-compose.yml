@@ -1,0 +1,148 @@
+name: streams
+
+services:
+  redis-database:
+    container_name: redis-database
+    hostname: redis-database
+    image: redis:8.6.0
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: [ "CMD-SHELL", "redis-cli ping | grep PONG" ]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+      timeout: 5s
+
+  redis-insight:
+    container_name: redis-insight
+    hostname: redis-insight
+    image: redis/redisinsight:3.0.2
+    depends_on:
+      - redis-database
+    environment:
+      RI_REDIS_HOST: "redis-database"
+      RI_REDIS_PORT: "6379"
+    ports:
+      - "5540:5540"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -q -O- http://redis-insight:5540/api/health | grep -q '\"status\":\"up\"'"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+      timeout: 5s
+
+  producer:
+    build: .
+    command: ["io.redis.devrel.demo.eda.producer.TransactionProducer"]
+    environment:
+      REDIS_HOST: redis-database
+      REDIS_PORT: "6379"
+      PRODUCER_RATE_PER_SECOND: "100"
+    init: true
+    restart: on-failure
+    depends_on:
+      redis-database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  metrics-1:
+    build: .
+    command: ["io.redis.devrel.demo.eda.consumer.MetricsConsumer"]
+    environment:
+      REDIS_HOST: redis-database
+      REDIS_PORT: "6379"
+      METRICS_CONSUMER_NAME: metric-1
+      METRICS_PROCESSING_DELAY_MS: "11"
+    init: true
+    restart: on-failure
+    depends_on:
+      redis-database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  metrics-2:
+    build: .
+    command: ["io.redis.devrel.demo.eda.consumer.MetricsConsumer"]
+    environment:
+      REDIS_HOST: redis-database
+      REDIS_PORT: "6379"
+      METRICS_CONSUMER_NAME: metric-2
+      METRICS_PROCESSING_DELAY_MS: "11"
+    init: true
+    restart: on-failure
+    depends_on:
+      redis-database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  monitor-api:
+    build: .
+    command: ["io.redis.devrel.demo.eda.web.MonitorApiServer"]
+    environment:
+      REDIS_HOST: redis-database
+      REDIS_PORT: "6379"
+      MONITOR_API_PORT: "8080"
+      MONITOR_CONSUMER_NAME: "monitor-web-ui"
+    init: true
+    restart: on-failure
+    depends_on:
+      redis-database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  monitor-web:
+    build:
+      context: .
+      dockerfile: monitor-web/Dockerfile
+    ports:
+      - "8088:80"
+    restart: on-failure
+    depends_on:
+      monitor-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost/health"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+      timeout: 5s
+
+  alerts:
+    build: .
+    command: ["io.redis.devrel.demo.eda.consumer.AlertConsumer"]
+    environment:
+      REDIS_HOST: redis-database
+      REDIS_PORT: "6379"
+      ALERTS_CONSUMER_NAME: alert-engine
+    init: true
+    restart: on-failure
+    depends_on:
+      redis-database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
