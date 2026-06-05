@@ -6,6 +6,7 @@ import io.redis.devrel.demo.eda.runtime.RuntimeSupport;
 import redis.clients.jedis.StreamEntryID;
 import redis.clients.jedis.UnifiedJedis;
 import redis.clients.jedis.exceptions.JedisDataException;
+import redis.clients.jedis.params.XAutoClaimParams;
 import redis.clients.jedis.params.XReadGroupParams;
 import redis.clients.jedis.resps.StreamEntry;
 
@@ -18,6 +19,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
+import static io.redis.devrel.demo.eda.domain.Constants.AUTOCLAIM_IDLE_THRESHOLD_MS_ENV;
+import static io.redis.devrel.demo.eda.domain.Constants.AUTOCLAIM_IDLE_THRESHOLD_DEFAULT_MS;
 import static io.redis.devrel.demo.eda.domain.Constants.ALERTS_CONSUMER_NAME;
 import static io.redis.devrel.demo.eda.domain.Constants.ALERTS_CONSUMER_NAME_ENV;
 import static io.redis.devrel.demo.eda.domain.Constants.ALERTS_GROUP_NAME;
@@ -50,17 +53,20 @@ public final class AlertConsumer {
     private final TransactionCodec txCodec;
     private final RuntimeSupport runtimeSupport;
     private final String consumerName;
+    private final long autoClaimIdleThresholdMs;
 
     public AlertConsumer(
             UnifiedJedis jedis,
             TransactionCodec txCodec,
             RuntimeSupport runtimeSupport,
-            String consumerName
+            String consumerName,
+            long autoClaimIdleThresholdMs
     ) {
         this.jedis = Objects.requireNonNull(jedis, "jedis must not be null");
         this.txCodec = Objects.requireNonNull(txCodec, "codec must not be null");
         this.runtimeSupport = Objects.requireNonNull(runtimeSupport, "runtimeSupport must not be null");
         this.consumerName = Objects.requireNonNull(consumerName, "consumerName must not be null");
+        this.autoClaimIdleThresholdMs = autoClaimIdleThresholdMs;
     }
 
     public void run() {
@@ -80,6 +86,17 @@ public final class AlertConsumer {
                 List<StreamMessage> pendingEntries = readGroup(PENDING_ID, 10);
                 if (!pendingEntries.isEmpty()) {
                     processed += processEntries(pendingEntries);
+                    continue;
+                }
+
+                List<StreamMessage> claimedEntries = claimIdleEntries(10);
+                if (!claimedEntries.isEmpty()) {
+                    System.out.printf(
+                            "Alert consumer %s reclaimed %d stranded entries%n",
+                            consumerName,
+                            claimedEntries.size()
+                    );
+                    processed += processEntries(claimedEntries);
                     continue;
                 }
 
@@ -115,6 +132,25 @@ public final class AlertConsumer {
                 throw e;
             }
         }
+    }
+
+    private List<StreamMessage> claimIdleEntries(int count) {
+        Map.Entry<StreamEntryID, List<StreamEntry>> result = jedis.xautoclaim(
+                TRANSACTIONS_STREAM_KEY,
+                ALERTS_GROUP_NAME,
+                consumerName,
+                autoClaimIdleThresholdMs,
+                new StreamEntryID(STREAM_GROUP_START_ID),
+                XAutoClaimParams.xAutoClaimParams().count(count)
+        );
+        if (result == null || result.getValue() == null || result.getValue().isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<StreamMessage> entries = new ArrayList<>();
+        for (StreamEntry e : result.getValue()) {
+            entries.add(new StreamMessage(e.getID().toString(), e.getFields()));
+        }
+        return entries;
     }
 
     private List<StreamMessage> readGroup(StreamEntryID streamEntryID, int count) {
@@ -390,16 +426,38 @@ public final class AlertConsumer {
         return ALERTS_CONSUMER_NAME;
     }
 
+    private static long loadAutoClaimIdleThresholdMs() {
+        String raw = System.getenv(AUTOCLAIM_IDLE_THRESHOLD_MS_ENV);
+        if (raw == null || raw.isBlank()) {
+            return AUTOCLAIM_IDLE_THRESHOLD_DEFAULT_MS;
+        }
+        try {
+            long value = Long.parseLong(raw.trim());
+            if (value < 1L) {
+                throw new IllegalArgumentException(
+                        AUTOCLAIM_IDLE_THRESHOLD_MS_ENV + " must be greater than 0"
+                );
+            }
+            return value;
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    AUTOCLAIM_IDLE_THRESHOLD_MS_ENV + " must be an integer number of milliseconds", e
+            );
+        }
+    }
+
     public static void main(String[] args) {
         RuntimeSupport runtimeSupport = new RuntimeSupport();
         String consumerName = loadConsumerName();
+        long autoClaimIdleThresholdMs = loadAutoClaimIdleThresholdMs();
 
         try (UnifiedJedis jedis = runtimeSupport.createJedisFromEnv()) {
             AlertConsumer consumer = new AlertConsumer(
                     jedis,
                     new TransactionCodec(),
                     runtimeSupport,
-                    consumerName
+                    consumerName,
+                    autoClaimIdleThresholdMs
             );
             consumer.run();
         }

@@ -59,6 +59,7 @@ services:
       REDIS_PORT: "6379"
       METRICS_CONSUMER_NAME: metric-1
       METRICS_PROCESSING_DELAY_MS: "11"
+      AUTOCLAIM_IDLE_THRESHOLD_MS: "10000"
     init: true
     restart: on-failure
     depends_on:
@@ -79,6 +80,7 @@ services:
       REDIS_PORT: "6379"
       METRICS_CONSUMER_NAME: metric-2
       METRICS_PROCESSING_DELAY_MS: "11"
+      AUTOCLAIM_IDLE_THRESHOLD_MS: "10000"
     init: true
     restart: on-failure
     depends_on:
@@ -135,6 +137,7 @@ services:
       REDIS_HOST: redis-database
       REDIS_PORT: "6379"
       ALERTS_CONSUMER_NAME: alert-engine
+      AUTOCLAIM_IDLE_THRESHOLD_MS: "10000"
     init: true
     restart: on-failure
     depends_on:

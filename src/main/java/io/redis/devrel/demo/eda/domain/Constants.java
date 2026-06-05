@@ -30,6 +30,9 @@ public final class Constants {
     public static final String ALERTS_CONSUMER_NAME_ENV = "ALERTS_CONSUMER_NAME";
     public static final String ALERTS_CONSUMER_NAME = "alert-engine";
 
+    public static final String AUTOCLAIM_IDLE_THRESHOLD_MS_ENV = "AUTOCLAIM_IDLE_THRESHOLD_MS";
+    public static final long AUTOCLAIM_IDLE_THRESHOLD_DEFAULT_MS = 10_000L;
+
     public static final String MONITOR_GROUP_NAME = "monitor-cg";
     public static final String MONITOR_CONSUMER_NAME_ENV = "MONITOR_CONSUMER_NAME";
     public static final String MONITOR_CONSUMER_NAME = "monitor-web-ui";
