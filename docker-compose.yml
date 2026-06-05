@@ -4,7 +4,7 @@ services:
   redis-database:
     container_name: redis-database
     hostname: redis-database
-    image: redis:8.6.0
+    image: redis:8.8.0
     ports:
       - "6379:6379"
     healthcheck:
@@ -17,7 +17,7 @@ services:
   redis-insight:
     container_name: redis-insight
     hostname: redis-insight
-    image: redis/redisinsight:3.0.2
+    image: redis/redisinsight:3.4.2
     depends_on:
       - redis-database
     environment:
