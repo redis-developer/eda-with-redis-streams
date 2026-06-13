@@ -10,10 +10,25 @@ public final class Constants {
     public static final String STREAM_GROUP_START_ID = "0-0";
     public static final String HEALTH_FILE_PATH = "/tmp/healthy";
 
+    // The native pipeline's source event log. This is an ordinary Redis Stream the demo owns
+    // outright; the native producer writes here and the consumer groups below read from it. It is
+    // deliberately Korvet-agnostic.
     public static final String TRANSACTIONS_STREAM_KEY = "transactions";
     public static final String PRODUCER_RATE_PER_SECOND_ENV = "PRODUCER_RATE_PER_SECOND";
     public static final int PRODUCER_DEFAULT_RATE_PER_SECOND = 100;
     public static final int PRODUCER_MAX_RATE_PER_SECOND = 100;
+
+    // Kafka-protocol path (Korvet). The bridge is the ONLY component aware of Korvet's internal
+    // storage layout: it reads the partition stream Korvet uses to back the Kafka topic
+    // "transactions" (partition 0) and copies each event into TRANSACTIONS_STREAM_KEY above, so
+    // events produced through the Kafka protocol flow into the native pipeline unchanged. The key
+    // layout (<namespace>:storage:local:<topic>:<partition>) is fixed by Korvet; only the leading
+    // namespace is configurable, and it defaults to "korvet".
+    public static final String TRANSACTIONS_TOPIC = "transactions";
+    public static final String KORVET_TRANSACTIONS_STREAM_KEY = "korvet:storage:local:transactions:0";
+    public static final String TRANSLATOR_GROUP_NAME = "translator-cg";
+    public static final String TRANSLATOR_CONSUMER_NAME_ENV = "TRANSLATOR_CONSUMER_NAME";
+    public static final String TRANSLATOR_CONSUMER_NAME = "korvet-translator";
 
     public static final String METRICS_GROUP_NAME = "metrics-cg";
     public static final String METRICS_CONSUMER_NAME_ENV = "METRICS_CONSUMER_NAME";

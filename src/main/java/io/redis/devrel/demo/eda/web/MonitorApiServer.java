@@ -405,10 +405,10 @@ public final class MonitorApiServer {
     }
 
     private static boolean isActiveMetricsConsumer(StreamConsumerInfo consumerInfo) {
-        Long inactive = consumerInfo.getInactive();
-        if (inactive != null) {
-            return inactive <= ACTIVE_METRICS_CONSUMER_WINDOW_MS;
-        }
+        // "Active" means the worker is alive and polling, not that it recently processed an event.
+        // Use idle (ms since the consumer's last XREADGROUP attempt), which stays small while the
+        // worker loops, rather than inactive (ms since its last successful read), which climbs
+        // whenever the stream is quiet (e.g. the producer is stopped) even though the worker is up.
         return consumerInfo.getIdle() <= ACTIVE_METRICS_CONSUMER_WINDOW_MS;
     }
 

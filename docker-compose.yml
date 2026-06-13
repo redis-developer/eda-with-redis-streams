@@ -32,6 +32,47 @@ services:
       start_period: 5s
       timeout: 5s
 
+  korvet:
+    container_name: korvet
+    hostname: korvet
+    image: redisfield/korvet:latest
+    pull_policy: always
+    depends_on:
+      redis-database:
+        condition: service_healthy
+    environment:
+      KORVET_REDIS_URI: redis://redis-database:6379
+      KORVET_BROKER_ADVERTISED_HOST: korvet
+      KORVET_STORAGE_LOCAL_COMPRESSION_CODEC: none
+    ports:
+      - "9092:9092"
+
+  kafka-tools:
+    container_name: kafka-tools
+    image: apache/kafka
+    command: sleep infinity
+    depends_on:
+      - korvet
+
+  translator:
+    build: .
+    command: ["io.redis.devrel.demo.eda.consumer.KorvetConsumer"]
+    environment:
+      REDIS_HOST: redis-database
+      REDIS_PORT: "6379"
+      TRANSLATOR_CONSUMER_NAME: korvet-translator
+    init: true
+    restart: on-failure
+    depends_on:
+      redis-database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
   producer:
     build: .
     command: ["io.redis.devrel.demo.eda.producer.TransactionProducer"]
