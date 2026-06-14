@@ -22,21 +22,6 @@ import static io.redis.devrel.demo.eda.domain.Constants.STREAM_GROUP_START_ID;
 import static io.redis.devrel.demo.eda.domain.Constants.TRANSACTIONS_STREAM_KEY;
 import static redis.clients.jedis.StreamEntryID.XREADGROUP_UNDELIVERED_ENTRY;
 
-/**
- * Bridges the Kafka-protocol path into the native Redis Streams pipeline.
- *
- * <p>This is the single component that is aware of Korvet's internal storage layout. It runs a
- * Redis Streams consumer group over the partition stream Korvet uses to back the Kafka topic
- * {@code transactions} ({@link io.redis.devrel.demo.eda.domain.Constants#KORVET_TRANSACTIONS_STREAM_KEY}),
- * and copies each record's {@code value} field verbatim into the demo's own
- * {@code transactions} stream ({@link io.redis.devrel.demo.eda.domain.Constants#TRANSACTIONS_STREAM_KEY}).
- * The native producer and the metrics/alerts/monitor consumers therefore stay Korvet-agnostic:
- * events produced over the Kafka protocol show up in the pipeline as ordinary native entries.
- *
- * <p>It forwards the opaque {@code value} payload as-is, so it is format-agnostic for the
- * plain-JSON path. Korvet must be configured with {@code storage.compression.type=none} (set in
- * docker-compose) so the value is readable rather than an LZ4 frame.
- */
 public final class KorvetConsumer {
     private static final StreamEntryID PENDING_ID = new StreamEntryID(STREAM_GROUP_START_ID);
     private static final StreamEntryID NEW_ENTRY_ID = XREADGROUP_UNDELIVERED_ENTRY;
