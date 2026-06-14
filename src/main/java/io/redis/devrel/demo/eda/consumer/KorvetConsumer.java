@@ -1,5 +1,9 @@
 package io.redis.devrel.demo.eda.consumer;
 
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import io.redis.devrel.demo.eda.domain.Transaction;
+import io.redis.devrel.demo.eda.domain.TransactionCodec;
 import io.redis.devrel.demo.eda.runtime.RuntimeSupport;
 import redis.clients.jedis.StreamEntryID;
 import redis.clients.jedis.UnifiedJedis;
@@ -9,7 +13,6 @@ import redis.clients.jedis.resps.StreamEntry;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -33,6 +36,7 @@ public final class KorvetConsumer {
     private final UnifiedJedis jedis;
     private final RuntimeSupport runtimeSupport;
     private final String consumerName;
+    private final TransactionCodec codec = new TransactionCodec();
 
     public KorvetConsumer(UnifiedJedis jedis, RuntimeSupport runtimeSupport, String consumerName) {
         this.jedis = Objects.requireNonNull(jedis, "jedis must not be null");
@@ -129,10 +133,13 @@ public final class KorvetConsumer {
         long forwarded = 0L;
         for (StreamMessage entry : entries) {
             String value = entry.fields().get(VALUE_FIELD);
-            if (value != null) {
-                Map<String, String> fields = new LinkedHashMap<>();
-                fields.put(VALUE_FIELD, value);
-                jedis.xadd(TRANSACTIONS_STREAM_KEY, StreamEntryID.NEW_ENTRY, fields);
+            if (value != null && !value.isBlank()) {
+                // Korvet stores the Kafka record value as a single JSON field. Parse it into a
+                // Transaction and re-write it through the codec so the entry lands in the native
+                // transactions stream as discrete fields, identical to what the native producer
+                // writes.
+                Transaction transaction = parseValue(value);
+                jedis.xadd(TRANSACTIONS_STREAM_KEY, StreamEntryID.NEW_ENTRY, codec.toFields(transaction));
                 forwarded++;
             }
             // Ack on the source stream regardless: a value-less record (tombstone) has nothing to
@@ -141,6 +148,32 @@ public final class KorvetConsumer {
         }
         runtimeSupport.writeHeartbeat();
         return forwarded;
+    }
+
+    private static Transaction parseValue(String rawValue) {
+        JsonObject json = JsonParser.parseString(rawValue).getAsJsonObject();
+
+        long timestamp = (long) getDouble(json, "timestamp", 0.0d);
+        if (timestamp <= 0L) {
+            timestamp = System.currentTimeMillis();
+        }
+
+        return new Transaction(
+                getString(json, "txnId", "TXN-unknown"),
+                getDouble(json, "amount", 0.0d),
+                getString(json, "category", "uncategorized"),
+                getString(json, "region", "unknown"),
+                (int) getDouble(json, "riskScore", 0.0d),
+                timestamp
+        );
+    }
+
+    private static String getString(JsonObject json, String key, String fallback) {
+        return json.has(key) && !json.get(key).isJsonNull() ? json.get(key).getAsString() : fallback;
+    }
+
+    private static double getDouble(JsonObject json, String key, double fallback) {
+        return json.has(key) && !json.get(key).isJsonNull() ? json.get(key).getAsDouble() : fallback;
     }
 
     private static String loadConsumerName() {

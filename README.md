@@ -122,9 +122,9 @@ This demo starts with a single source stream named `transactions`. The producer 
 * `alerts-cg` maintains rolling state and emits derived events into the `alerts` stream
 * `monitor-cg` powers the live web dashboard and exposes a JSON snapshot through `monitor-api`
 
-The native pipeline owns an ordinary Redis Stream named `transactions`. The producer appends synthetic events there, and each entry stores the event as JSON in a single `value` field. The consumers never reference Korvet; they just read `transactions`.
+The native pipeline owns an ordinary Redis Stream named `transactions`. The producer appends synthetic events there, and each entry stores the event as discrete fields (`txn_id`, `amount`, `category`, `region`, `risk_score`, `timestamp`). The consumers never reference Korvet; they just read `transactions`.
 
-Events produced through the Kafka protocol take a separate route and are merged in by the `translator`. Korvet stores the Kafka topic `transactions` (partition `0`) in its own stream, `korvet:storage:local:transactions:0` (layout `<namespace>:storage:local:<topic>:<partition>`). The translator is the only component that knows that key: it runs a Redis consumer group over it and copies each event's `value` into the demo's `transactions` stream, where the normal consumers pick it up. This keeps the native producer and consumers Korvet-agnostic while still letting Kafka-produced events flow into the live pipeline.
+Events produced through the Kafka protocol take a separate route and are merged in by the `translator`. Korvet stores the Kafka topic `transactions` (partition `0`) in its own stream, `korvet:storage:local:transactions:0` (layout `<namespace>:storage:local:<topic>:<partition>`), where the record value is a single JSON `value` field. The translator is the only component that knows that key: it runs a Redis consumer group over it, parses each event's JSON `value`, and re-writes it as the same discrete fields into the demo's `transactions` stream, where the normal consumers pick it up. This keeps the native producer and consumers Korvet-agnostic while still letting Kafka-produced events flow into the live pipeline.
 
 To inspect the flow directly, open Redis Insight and look at:
 
@@ -181,7 +181,7 @@ This causes `monitor-cg` to fall behind temporarily while `metrics-cg` and `aler
 ### Sending events through the Kafka protocol (Korvet)
 The whole demo so far has been pure Redis Streams: a native producer appends to the `transactions` stream, and native consumer groups read from it. The final act shows that the very same pipeline can be fed through the Kafka protocol instead, with no changes to the consumers or the dashboard.
 
-This works because [Korvet](https://github.com/redis-field-engineering/korvet-dist) is a Kafka-compatible broker that stores each Kafka topic partition as a Redis Stream. The topic `transactions`, partition `0`, maps to Korvet's own stream `korvet:storage:local:transactions:0`, where a Kafka record's value is stored verbatim in a `value` field. The `translator` service tails that stream with a Redis consumer group and copies each `value` into the demo's `transactions` stream, so a Kafka-produced event arrives in the native pipeline as an ordinary entry. The native producer and consumers stay completely unaware of Korvet — only the translator knows Korvet's key.
+This works because [Korvet](https://github.com/redis-field-engineering/korvet-dist) is a Kafka-compatible broker that stores each Kafka topic partition as a Redis Stream. The topic `transactions`, partition `0`, maps to Korvet's own stream `korvet:storage:local:transactions:0`, where a Kafka record's value is stored verbatim in a single `value` field. The `translator` service tails that stream with a Redis consumer group, parses each JSON `value`, and re-writes it as discrete fields into the demo's `transactions` stream — so a Kafka-produced event arrives in the native pipeline identical in shape to what the native producer writes. The native producer and consumers stay completely unaware of Korvet — only the translator knows Korvet's key and its JSON layout.
 
 First, stop the native producer so the only new events are the ones you send via Kafka:
 
@@ -230,14 +230,14 @@ docker compose exec redis-database redis-cli XRANGE korvet:storage:local:transac
 docker compose exec redis-database redis-cli XREVRANGE transactions + - COUNT 5
 ```
 
-Both show entries with a `value` field holding the JSON you sent. The forwarded copies in `transactions` carry their own stream entry IDs (the translator re-appends them), which is expected — forwarding produces a copy rather than sharing the physical entry, the price of keeping the two systems decoupled. You can also watch the translator work: `docker compose logs --tail=20 translator`.
+Korvet's stream shows a single `value` field holding the JSON you sent; the `transactions` entries show the discrete fields (`txn_id`, `amount`, `category`, …) the translator produced from it. The forwarded copies in `transactions` carry their own stream entry IDs (the translator re-appends them), which is expected — forwarding produces a copy rather than sharing the physical entry, the price of keeping the two systems decoupled. You can also watch the translator work: `docker compose logs --tail=20 translator`.
 
-> A note on readability: Korvet compresses the stored `value` with LZ4 by default. This demo sets `KORVET_STORAGE_LOCAL_COMPRESSION_CODEC=none` on the `korvet` service so the value stays plain JSON that the native consumers (and Redis Insight) can read directly.
+> A note on readability: Korvet compresses the stored `value` with LZ4 by default. This demo sets `KORVET_STORAGE_LOCAL_COMPRESSION_CODEC=none` on the `korvet` service so the value stays plain JSON that the translator can parse (and that you can read directly in Redis Insight).
 
 ## Architecture
 At a high level, the architecture consists of one producer, three independent consumer groups, one derived stream, and a browser dashboard backed by a dedicated monitor API. Redis serves as the stream platform, the state store for alerts, the analytics store for metrics, and the metadata source for consumer-group observability. The native producer and consumers work entirely against the demo's own `transactions` stream and have no knowledge of Korvet.
 
-Alongside these, Korvet runs as a Kafka-compatible broker over the same Redis, so the event log can also be fed through the Kafka protocol. Korvet stores Kafka topics in its own keyspace; a small `translator` service tails Korvet's `transactions` partition stream and forwards each event into the demo's `transactions` stream. The translator is the single point of contact between the two worlds, which keeps the native pipeline decoupled from Korvet's internal storage layout. The trade-off is that forwarded events are copies (new entry IDs) rather than the same physical Redis entry.
+Alongside these, Korvet runs as a Kafka-compatible broker over the same Redis, so the event log can also be fed through the Kafka protocol. Korvet stores Kafka topics in its own keyspace; a small `translator` service tails Korvet's `transactions` partition stream, converts each event from Korvet's single JSON `value` into the demo's discrete-field format, and writes it into the demo's `transactions` stream. The translator is the single point of contact between the two worlds, which keeps the native pipeline decoupled from Korvet's internal storage layout. The trade-off is that forwarded events are copies (new entry IDs) rather than the same physical Redis entry.
 
 ![architecture.png](images/architecture.png)
 
