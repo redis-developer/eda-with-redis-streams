@@ -46,13 +46,28 @@ services:
       KORVET_STORAGE_LOCAL_COMPRESSION_CODEC: none
     ports:
       - "9092:9092"
+    healthcheck:
+      test: echo srvr | nc korvet 9092 || exit 1
+      interval: 5s
+      retries: 10
 
   kafka-tools:
     container_name: kafka-tools
     image: apache/kafka
-    command: sleep infinity
+    command:
+      - bash
+      - -c
+      - |
+        echo "Ensuring Kafka topic 'transactions' exists..."
+        until /opt/kafka/bin/kafka-topics.sh --bootstrap-server korvet:9092 --create --if-not-exists --topic transactions --partitions 1 --replication-factor 1; do
+          echo "Korvet not ready for admin requests yet; retrying in 2s..."
+          sleep 2
+        done
+        echo "Topic 'transactions' is ready; kafka-tools idle and available for exec."
+        sleep infinity
     depends_on:
-      - korvet
+      korvet:
+        condition: service_healthy
 
   translator:
     build: .

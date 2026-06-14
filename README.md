@@ -75,7 +75,7 @@ This will:
 * Start a Redis database on port `6379`
 * Start Redis Insight on port `5540`
 * Start Korvet, a Kafka-compatible broker backed by the same Redis, on port `9092`
-* Start a `kafka-tools` container with the standard Kafka CLI tools
+* Start a `kafka-tools` container with the standard Kafka CLI tools, which also creates the `transactions` topic on boot and then idles
 * Start the `translator`, which forwards events produced through the Kafka protocol into the native `transactions` stream
 * Start a transaction producer that continuously writes to the `transactions` stream
 * Start two metrics consumers in the `metrics-cg` consumer group
@@ -189,19 +189,19 @@ First, stop the native producer so the only new events are the ones you send via
 docker compose stop producer
 ```
 
-Create the topic with a single partition. Korvet does not auto-create topics by default, so this step is required. One partition is what guarantees every message lands in partition `0` (`korvet:storage:local:transactions:0`), the stream the translator tails:
-
-```bash
-docker compose exec kafka-tools /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server korvet:9092 \
-  --create --topic transactions --partitions 1 --replication-factor 1
-```
-
-Confirm it was created with one partition:
+The `transactions` topic is created automatically at startup: the `kafka-tools` container runs `kafka-topics.sh --create --if-not-exists` on boot (a temporary patch while Korvet's auto-create configuration is being investigated). A single partition guarantees every message lands in partition `0` (`korvet:storage:local:transactions:0`), the stream the translator tails. You can confirm it exists:
 
 ```bash
 docker compose exec kafka-tools /opt/kafka/bin/kafka-topics.sh \
   --bootstrap-server korvet:9092 --describe --topic transactions
+```
+
+If you ever need to (re)create it by hand — it's idempotent — run:
+
+```bash
+docker compose exec kafka-tools /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server korvet:9092 \
+  --create --if-not-exists --topic transactions --partitions 1 --replication-factor 1
 ```
 
 Now produce events with the standard Kafka console producer and watch the dashboard at `http://localhost:8088` update — the metrics, alerts, and recent-transaction views all advance from Kafka-sent data:
@@ -210,7 +210,7 @@ Now produce events with the standard Kafka console producer and watch the dashbo
 docker compose exec kafka-tools /opt/kafka/bin/kafka-console-producer.sh \
   --bootstrap-server korvet:9092 \
   --topic transactions \
-  --producer-property enable.idempotence=false
+  --command-property enable.idempotence=false
 ```
 
 Then paste one JSON event per line (press Enter after each). Use the demo's own categories (`payroll`, `wire`, `pos`, `ach`, `internal`) and regions (`northeast`, `southeast`, `west`, `midwest`) so the analytics and alerts react as expected:
