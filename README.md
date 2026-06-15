@@ -197,7 +197,7 @@ Produce events with the standard Kafka console producer and watch the dashboard 
 docker compose exec kafka-tools /opt/kafka/bin/kafka-console-producer.sh \
   --bootstrap-server korvet:9092 \
   --topic transactions \
-  --producer-property enable.idempotence=false
+  --command-property enable.idempotence=false
 ```
 
 Then paste one JSON event per line (press Enter after each). Use the demo's own categories (`payroll`, `wire`, `pos`, `ach`, `internal`) and regions (`northeast`, `southeast`, `west`, `midwest`) so the analytics and alerts react as expected:
