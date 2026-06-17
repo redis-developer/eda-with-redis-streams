@@ -76,7 +76,8 @@ This will:
 * Start Redis Insight on port `5540`
 * Start Korvet, a Kafka-compatible broker backed by the same Redis, on port `9092`
 * Start a `kafka-tools` container with the standard Kafka CLI tools
-* Start the `translator`, which forwards events produced through the Kafka protocol into the native `transactions` stream
+* Start `kafka-connect`, a Kafka Connect worker with the Redis sink connector that forwards events produced through the Kafka protocol into the native `transactions` stream
+* Start `connect-init`, a one-shot container that registers the sink connector and then exits
 * Start a transaction producer that continuously writes to the `transactions` stream
 * Start two metrics consumers in the `metrics-cg` consumer group
 * Start an alert consumer in the `alerts-cg` consumer group
@@ -92,9 +93,10 @@ You should see the following services:
 
 * `redis-database`
 * `redis-insight`
-* `korvet`
+* `redis-korvet`
 * `kafka-tools`
-* `translator`
+* `kafka-connect`
+* `connect-init` (runs once, then exits — `docker compose ps -a` to see it)
 * `producer`
 * `metrics-1`
 * `metrics-2`
@@ -124,12 +126,12 @@ This demo starts with a single source stream named `transactions`. The producer 
 
 The native pipeline owns an ordinary Redis Stream named `transactions`. The producer appends synthetic events there, and each entry stores the event as discrete fields (`txn_id`, `amount`, `category`, `region`, `risk_score`, `timestamp`). The consumers never reference Korvet; they just read `transactions`.
 
-Events produced through the Kafka protocol take a separate route and are merged in by the `translator`. Korvet stores the Kafka topic `transactions` (partition `0`) in its own stream, `korvet:storage:local:transactions:0` (layout `<namespace>:storage:local:<topic>:<partition>`), where the record value is a single JSON `value` field. The translator is the only component that knows that key: it runs a Redis consumer group over it, parses each event's JSON `value`, and re-writes it as the same discrete fields into the demo's `transactions` stream, where the normal consumers pick it up. This keeps the native producer and consumers Korvet-agnostic while still letting Kafka-produced events flow into the live pipeline.
+Events produced through the Kafka protocol are merged in by **Kafka Connect** running the [Redis sink connector](https://github.com/redis-field-engineering/redis-kafka-connect). The sink consumes the `transactions` Kafka topic from Korvet and `XADD`s each record into the native `transactions` stream. Two in-pipeline transformations do the adaptation the native consumers need: a `ReplaceField` SMT renames `txnId`/`riskScore` to `txn_id`/`risk_score`, an `InsertField` SMT stamps the record timestamp, and `redis.type=STREAM` writes the JSON value out as discrete stream fields. This keeps the native producer and consumers Korvet-agnostic — the only Kafka/Korvet-aware piece is connector configuration, no custom code.
 
 To inspect the flow directly, open Redis Insight and look at:
 
 * Stream `transactions` (the native event log the consumers read)
-* Stream `korvet:storage:local:transactions:0` (Korvet's store for the Kafka topic; the translator's source)
+* Stream `korvet:storage:local:transactions:0` (Korvet's store for the Kafka topic; the source the sink connector consumes)
 * Stream `alerts`
 * Key `metrics:total_count`
 * Key `metrics:total_volume`
@@ -181,7 +183,7 @@ This causes `monitor-cg` to fall behind temporarily while `metrics-cg` and `aler
 ### Sending events through the Kafka protocol (Korvet)
 The whole demo so far has been pure Redis Streams: a native producer appends to the `transactions` stream, and native consumer groups read from it. The final act shows that the very same pipeline can be fed through the Kafka protocol instead, with no changes to the consumers or the dashboard.
 
-This works because [Korvet](https://github.com/redis-field-engineering/korvet-dist) is a Kafka-compatible broker that stores each Kafka topic partition as a Redis Stream. The topic `transactions`, partition `0`, maps to Korvet's own stream `korvet:storage:local:transactions:0`, where a Kafka record's value is stored verbatim in a single `value` field. The `translator` service tails that stream with a Redis consumer group, parses each JSON `value`, and re-writes it as discrete fields into the demo's `transactions` stream — so a Kafka-produced event arrives in the native pipeline identical in shape to what the native producer writes. The native producer and consumers stay completely unaware of Korvet — only the translator knows Korvet's key and its JSON layout.
+This works because [Korvet](https://github.com/redis-field-engineering/korvet-dist) is a Kafka-compatible broker that stores each Kafka topic partition as a Redis Stream, and **Kafka Connect** (with the [Redis sink connector](https://github.com/redis-field-engineering/redis-kafka-connect)) moves those records into the native `transactions` stream. The `kafka-connect` worker runs the sink connector — registered once by `connect-init` — which consumes the `transactions` topic from Korvet and `XADD`s each record into the `transactions` Redis stream. The connector's JSON converter plus a `ReplaceField` and an `InsertField` SMT turn the Kafka record into the exact discrete fields the native consumers expect, so a Kafka-produced event arrives in the pipeline identical in shape to what the native producer writes — with no custom glue code.
 
 First, stop the native producer so the only new events are the ones you send via Kafka:
 
@@ -189,13 +191,13 @@ First, stop the native producer so the only new events are the ones you send via
 docker compose stop producer
 ```
 
-The `transactions` topic does not need to be created by hand. The `korvet` service is configured to auto-create it with a single partition (`KORVET_TOPICS_0_*` in `docker-compose.yml`). Korvet creates topics **lazily** — on the first produce, not at server startup — so listing topics before you produce shows nothing; that is expected, not a failure. The single partition guarantees every message lands in partition `0` (`korvet:storage:local:transactions:0`), the stream the translator tails.
+The `transactions` topic does not need to be created by hand. The `redis-korvet` service is configured to auto-create it with a single partition (`KORVET_TOPICS_0_*` in `docker-compose.yml`). Korvet creates topics **lazily** — on the first produce, not at server startup — so listing topics before you produce shows nothing; that is expected, not a failure. The single partition guarantees every message lands in partition `0` (`korvet:storage:local:transactions:0`), the stream the sink connector consumes.
 
 Produce events with the standard Kafka console producer and watch the dashboard at `http://localhost:8088` update — the first produce creates the topic, and the metrics, alerts, and recent-transaction views all advance from Kafka-sent data:
 
 ```bash
 docker compose exec kafka-tools /opt/kafka/bin/kafka-console-producer.sh \
-  --bootstrap-server korvet:9092 \
+  --bootstrap-server redis-korvet:9092 \
   --topic transactions \
   --command-property enable.idempotence=false
 ```
@@ -208,30 +210,30 @@ Then paste one JSON event per line (press Enter after each). Use the demo's own 
 {"txnId":"TXN-kafka03","amount":15750.00,"category":"internal","region":"northeast","riskScore":88}
 ```
 
-The `timestamp` field is optional — when omitted, the consumers stamp the event with the current time on read. A `riskScore` above `80` counts as high risk, so the first and third events above increment the high-risk metric.
+You can omit the `timestamp` field — the `InsertField` SMT stamps each record with its Kafka record timestamp, so the `transactions` entry always carries one. A `riskScore` above `80` counts as high risk, so the first and third events above increment the high-risk metric.
 
 Once you have produced at least one event, the topic exists — confirm it (and its single partition) with:
 
 ```bash
 docker compose exec kafka-tools /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server korvet:9092 --describe --topic transactions
+  --bootstrap-server redis-korvet:9092 --describe --topic transactions
 ```
 
-To confirm the Kafka path, inspect both streams. Korvet's stream holds what you produced over Kafka; the native `transactions` stream holds the copies the translator forwarded (one per event):
+To confirm the Kafka path, inspect both streams. Korvet's stream holds what you produced over Kafka; the native `transactions` stream holds the records the sink connector forwarded (one per event):
 
 ```bash
 docker compose exec redis-database redis-cli XRANGE korvet:storage:local:transactions:0 - + COUNT 5
 docker compose exec redis-database redis-cli XREVRANGE transactions + - COUNT 5
 ```
 
-Korvet's stream shows a single `value` field holding the JSON you sent; the `transactions` entries show the discrete fields (`txn_id`, `amount`, `category`, …) the translator produced from it. The forwarded copies in `transactions` carry their own stream entry IDs (the translator re-appends them), which is expected — forwarding produces a copy rather than sharing the physical entry, the price of keeping the two systems decoupled. You can also watch the translator work: `docker compose logs --tail=20 translator`.
+Korvet's stream shows a single `value` field holding the JSON you sent; the `transactions` entries show the discrete fields (`txn_id`, `amount`, `category`, …) the connector produced from it. Entries in `transactions` carry their own stream entry IDs (the sink appends them), which is expected — the connector copies records rather than sharing the physical entry, the price of keeping the two systems decoupled. You can also watch the connector work: `docker compose logs --tail=20 kafka-connect`.
 
-> A note on readability: Korvet compresses the stored `value` with LZ4 by default. This demo sets `KORVET_STORAGE_LOCAL_COMPRESSION_CODEC=none` on the `korvet` service so the value stays plain JSON that the translator can parse (and that you can read directly in Redis Insight).
+> A note on readability: Korvet compresses the stored `value` with LZ4 by default. This demo sets `KORVET_STORAGE_LOCAL_COMPRESSION_CODEC=none` on the `redis-korvet` service so the value stays plain JSON you can read directly in Redis Insight. (The connector itself doesn't depend on this — Kafka clients receive decompressed data over the protocol regardless.)
 
 ## Architecture
 At a high level, the architecture consists of one producer, three independent consumer groups, one derived stream, and a browser dashboard backed by a dedicated monitor API. Redis serves as the stream platform, the state store for alerts, the analytics store for metrics, and the metadata source for consumer-group observability. The native producer and consumers work entirely against the demo's own `transactions` stream and have no knowledge of Korvet.
 
-Alongside these, Korvet runs as a Kafka-compatible broker over the same Redis, so the event log can also be fed through the Kafka protocol. Korvet stores Kafka topics in its own keyspace; a small `translator` service tails Korvet's `transactions` partition stream, converts each event from Korvet's single JSON `value` into the demo's discrete-field format, and writes it into the demo's `transactions` stream. The translator is the single point of contact between the two worlds, which keeps the native pipeline decoupled from Korvet's internal storage layout. The trade-off is that forwarded events are copies (new entry IDs) rather than the same physical Redis entry.
+Alongside these, Korvet runs as a Kafka-compatible broker over the same Redis, so the event log can also be fed through the Kafka protocol. Korvet stores Kafka topics in its own keyspace; **Kafka Connect** with the [Redis sink connector](https://github.com/redis-field-engineering/redis-kafka-connect) consumes the `transactions` topic and writes each record into the demo's `transactions` stream, with SMTs adapting the field names and the `STREAM` type exploding the JSON value into discrete fields. Connect is the single point of contact between the two worlds — standard, configuration-only tooling rather than custom code — which keeps the native pipeline decoupled from Korvet's internal storage layout. The trade-off is that forwarded events are copies (new entry IDs) rather than the same physical Redis entry.
 
 ![architecture.png](images/architecture.png)
 
@@ -242,7 +244,7 @@ Alongside these, Korvet runs as a Kafka-compatible broker over the same Redis, s
 * This is a demo workload with synthetic data and intentionally simplified operational behavior. It is designed to illustrate stream patterns, not to serve as a production reference architecture.
 * If the web dashboard is not updating, inspect the monitor service logs with `docker compose logs --tail=100 monitor-api`.
 * If metrics are not changing, inspect the worker logs with `docker compose logs --tail=100 metrics-1` and `docker compose logs --tail=100 metrics-2`.
-* If Kafka-produced events do not reach the dashboard, check the translator with `docker compose logs --tail=100 translator`. Also confirm the `transactions` topic has exactly one partition (`kafka-topics.sh --describe`), since the translator only tails partition `0`.
+* If Kafka-produced events do not reach the dashboard, check that the sink connector registered and is running: `curl -s http://localhost:8083/connectors/redis-transactions-sink/status` (or `docker compose logs --tail=100 kafka-connect`). Also confirm `connect-init` exited 0 (`docker compose ps -a`) and that the `transactions` topic has one partition (`kafka-topics.sh --describe`).
 
 ## Resources
 
@@ -250,7 +252,7 @@ Alongside these, Korvet runs as a Kafka-compatible broker over the same Redis, s
 * `src/main/java/io/redis/devrel/demo/eda/producer` for the transaction producer
 * `src/main/java/io/redis/devrel/demo/eda/consumer` for the metrics and alerts consumers
 * `src/main/java/io/redis/devrel/demo/eda/web` for the monitor API
-* `src/main/java/io/redis/devrel/demo/eda/consumer/KorvetConsumer.java` for the Korvet-to-Redis-Streams translator
+* [redis-kafka-connect](https://github.com/redis-field-engineering/redis-kafka-connect) for the Redis Kafka Connect sink connector, configured under the `kafka-connect` / `connect-init` services in `docker-compose.yml`
 * `monitor-web` for the browser dashboard
 * [Korvet](https://github.com/redis-field-engineering/korvet-dist) for the Kafka-compatible broker backed by Redis Streams, and its [Kafka CLI sample](https://github.com/redis-field-engineering/korvet-dist/tree/main/samples/kafka-cli)
 
