@@ -50,7 +50,7 @@ services:
     ports:
       - "9092:9092"
     healthcheck:
-      test: echo srvr | nc redis-korvet 9092 || exit 1
+      test: nc -z redis-korvet 9092 || exit 1
       interval: 5s
       retries: 10
 
@@ -194,6 +194,8 @@ services:
   monitor-api:
     build: .
     command: ["io.redis.devrel.demo.eda.web.MonitorApiServer"]
+    ports: 
+      - "8080:8080"
     environment:
       REDIS_HOST: redis-database
       REDIS_PORT: "6379"
