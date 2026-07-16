@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BAM with Redis Streams</title>
-  <link rel="stylesheet" href="/styles.css?v=3">
+  <link rel="stylesheet" href="/styles.css?v=4">
 </head>
 <body>
   <main class="shell">
@@ -27,13 +27,26 @@
         <p class="value" id="stream-transactions">0</p>
       </article>
       <article class="card stat-card">
-        <p class="label">Metrics Lag</p>
+        <p class="label">Metrics Backlog (entries)</p>
         <p class="value" id="metrics-lag">0</p>
       </article>
       <article class="card stat-card">
         <p class="label">Metrics Consumers</p>
         <p class="value" id="metrics-consumers">0</p>
       </article>
+    </section>
+
+    <section class="latency-section">
+      <div class="section-head compact">
+        <div>
+          <p class="eyebrow">Transport comparison</p>
+          <h2>End-to-end latency</h2>
+        </div>
+        <p class="stamp">produce → consume, same workload per lane</p>
+      </div>
+      <div class="latency-grid" id="latency-grid">
+        <p class="empty-row">Waiting for latency data…</p>
+      </div>
     </section>
 
     <section class="content-stack">
@@ -107,6 +120,6 @@
     </section>
   </main>
 
-  <script src="/app.js?v=2"></script>
+  <script src="/app.js?v=4"></script>
 </body>
 </html>

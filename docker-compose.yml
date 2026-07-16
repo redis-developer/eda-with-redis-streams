@@ -6,7 +6,9 @@ services:
     hostname: redis-database
     image: redis:8.8.0
     ports:
-      - "6379:6379"
+      # Published on 6380 to avoid clashing with a Redis already running on the host's 6379.
+      # Everything inside the compose network still talks to redis-database:6379.
+      - "6380:6379"
     healthcheck:
       test: [ "CMD-SHELL", "redis-cli ping | grep PONG" ]
       interval: 10s
@@ -44,7 +46,7 @@ services:
       KORVET_REDIS_URI: redis://redis-database:6379
       KORVET_BROKER_ADVERTISED_HOST: redis-korvet
       KORVET_STORAGE_LOCAL_COMPRESSION_CODEC: none
-      KORVET_TOPICS_0_NAME: "transactions"
+      KORVET_TOPICS_0_NAME: "kafka-transactions"
       KORVET_TOPICS_0_AUTO_CREATE: true
       KORVET_TOPICS_0_PARTITIONS: 1
     ports:
@@ -61,74 +63,6 @@ services:
     depends_on:
       redis-korvet:
         condition: service_healthy
-
-  kafka-connect:
-    container_name: kafka-connect
-    hostname: kafka-connect
-    image: fieldengineering/redis-kafka-connect
-    pull_policy: always
-    depends_on:
-      redis-korvet:
-        condition: service_healthy
-    ports:
-      - "8083:8083"
-    environment:
-      CONNECT_BOOTSTRAP_SERVERS: redis-korvet:9092
-      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
-      CONNECT_GROUP_ID: eda-connect
-      CONNECT_CONFIG_STORAGE_TOPIC: connect-configs
-      CONNECT_OFFSET_STORAGE_TOPIC: connect-offsets
-      CONNECT_STATUS_STORAGE_TOPIC: connect-status
-      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_OFFSET_STORAGE_PARTITIONS: 1
-      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_STATUS_STORAGE_PARTITIONS: 1
-      CONNECT_OFFSET_FLUSH_INTERVAL_MS: 10000
-      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
-      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
-      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/ >/dev/null || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 15
-      start_period: 40s
-
-  connect-init:
-    image: curlimages/curl:8.11.1
-    restart: "no"
-    depends_on:
-      kafka-connect:
-        condition: service_healthy
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        echo "Registering Redis sink connector..."
-        until curl -fsS -X PUT http://kafka-connect:8083/connectors/redis-transactions-sink/config \
-          -H "Content-Type: application/json" \
-          -d '{
-            "connector.class": "com.redis.kafka.connect.RedisSinkConnector",
-            "tasks.max": "1",
-            "topics": "transactions",
-            "redis.uri": "redis://redis-database:6379",
-            "redis.type": "STREAM",
-            "redis.keyspace": "transactions",
-            "key.converter": "org.apache.kafka.connect.storage.StringConverter",
-            "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-            "value.converter.schemas.enable": "false",
-            "transforms": "rename,addTimestamp",
-            "transforms.rename.type": "org.apache.kafka.connect.transforms.ReplaceField$$Value",
-            "transforms.rename.renames": "txnId:txn_id,riskScore:risk_score",
-            "transforms.addTimestamp.type": "org.apache.kafka.connect.transforms.InsertField$$Value",
-            "transforms.addTimestamp.timestamp.field": "timestamp",
-            "consumer.override.auto.offset.reset": "earliest"
-          }'; do
-          echo "Connect not ready to accept the connector (starting or rebalancing); retrying in 5s..."
-          sleep 5
-        done
-        echo "Redis sink connector registered."
 
   producer:
     build: .
@@ -249,3 +183,67 @@ services:
       timeout: 3s
       retries: 10
       start_period: 15s
+
+  # --- Lane A timing probe: reads the native Redis stream and measures end-to-end latency ---
+  redis-probe:
+    build: .
+    command: ["io.redis.devrel.demo.eda.probe.RedisLatencyProbe"]
+    environment:
+      REDIS_HOST: redis-database
+      REDIS_PORT: "6379"
+      PROBE_CONSUMER_NAME: redis-probe
+    init: true
+    restart: on-failure
+    depends_on:
+      redis-database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  # --- Lane B producer: the same workload over the Kafka protocol, served by Korvet ---
+  kafka-producer:
+    build: .
+    command: ["io.redis.devrel.demo.eda.producer.KafkaTransactionProducer"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redis-korvet:9092
+      KAFKA_TOPIC: kafka-transactions
+      PRODUCER_RATE_PER_SECOND: "100"
+    init: true
+    restart: on-failure
+    depends_on:
+      redis-korvet:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  # --- Lane B timing probe: a standard Kafka consumer group against Korvet ---
+  kafka-probe:
+    build: .
+    command: ["io.redis.devrel.demo.eda.probe.KafkaLatencyProbe"]
+    environment:
+      REDIS_HOST: redis-database
+      REDIS_PORT: "6379"
+      KAFKA_BOOTSTRAP_SERVERS: redis-korvet:9092
+      KAFKA_TOPIC: kafka-transactions
+      KAFKA_PROBE_GROUP: probe-korvet
+    init: true
+    restart: on-failure
+    depends_on:
+      redis-database:
+        condition: service_healthy
+      redis-korvet:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s

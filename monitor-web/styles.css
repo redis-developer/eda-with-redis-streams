@@ -374,12 +374,94 @@ tbody tr:last-child td {
   padding: 12px 0;
 }
 
+.latency-section {
+  margin-bottom: 16px;
+}
+
+.latency-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.lane-card {
+  padding: 20px;
+  border-top: 4px solid var(--accent);
+}
+
+.lane-card.lane-korvet {
+  border-top-color: #8a5cf6;
+}
+
+.lane-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.lane-name {
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.lane-tag {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.lane-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.lane-stats .value {
+  font-size: 1.7rem;
+}
+
+.lane-stats .unit {
+  margin-left: 3px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.lane-bar-track {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(9, 21, 29, 0.08);
+  overflow: hidden;
+  margin-top: 16px;
+}
+
+.lane-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), #39a3b0);
+}
+
+.lane-korvet .lane-bar-fill {
+  background: linear-gradient(90deg, #8a5cf6, #b18cff);
+}
+
+.lane-foot {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 @media (max-width: 1100px) {
   .stats-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .metrics-grid {
+  .metrics-grid,
+  .latency-grid {
     grid-template-columns: 1fr;
   }
 }

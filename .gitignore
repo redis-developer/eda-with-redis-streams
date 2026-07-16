@@ -2,3 +2,7 @@ target/
 .idea/
 .DS_Store
 
+# Internal-only notes — never commit (customer names, internal links)
+INTERNAL-*.md
+*.internal.md
+

@@ -1,5 +1,6 @@
 package io.redis.devrel.demo.eda.domain;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -14,13 +15,15 @@ public final class TransactionGenerator {
         double amount = amountFor(category, random);
         int riskScore = riskFor(category, region, amount, random);
 
+        Instant now = Instant.now();
         return new Transaction(
                 "TXN-" + randomHex(random, 6),
                 amount,
                 category,
                 region,
                 riskScore,
-                System.currentTimeMillis()
+                now.toEpochMilli(),
+                now.getEpochSecond() * 1_000_000L + now.getNano() / 1_000L
         );
     }
 

@@ -1,14 +1,23 @@
 # Redis Streams EDA Demo
 
 ## Overview
-This demo showcases how Redis Streams can power a compact event-driven workflow using a single Redis deployment and a small set of containerized services. Built with Java, Redis, Redis Insight, and a lightweight web dashboard, it demonstrates one source stream feeding multiple independent consumer groups, materialized analytics stored directly in Redis data structures, stateful alert generation into a derived stream, and live observability through a browser-based monitor. The goal is to make stream processing patterns easy to run, explain, and inspect on one machine.
+This demo shows event-driven processing on Redis Streams and, side by side, the same workload running over the Kafka protocol against [Korvet](https://github.com/redis-field-engineering/korvet-dist) — a Kafka-compatible broker backed by Redis Streams. Built with Java, Redis, Redis Insight, and a lightweight web dashboard, it runs two independent lanes on one machine:
+
+* **Lane A — native Redis Streams.** A Java producer `XADD`s synthetic transactions to a `transactions` stream; independent consumer groups materialize analytics, emit a derived `alerts` stream, and power a live dashboard.
+* **Lane B — Kafka on Redis (Korvet).** A standard Kafka client produces the same transactions to a Korvet topic and a standard Kafka consumer group reads them back. The only difference from a real Kafka deployment is `bootstrap.servers` — the broker is Korvet, and Redis is the log.
+
+A timing probe on each lane measures end-to-end latency (produce → consume) and the dashboard renders the two lanes head to head, so you can see that the Kafka-on-Redis path behaves comparably to the Redis-native one.
 
 ## Table of Contents
 
 * Demo Objectives
+* How It Works
 * Setup
 * Running the Demo
-* Architecture
+* The Timing View
+* Demonstrating Lag and Recovery
+* Lane B: The Kafka Protocol via Korvet
+* Inspecting State in Redis Insight
 * Known Issues
 * Resources
 * Maintainers
@@ -16,12 +25,32 @@ This demo showcases how Redis Streams can power a compact event-driven workflow 
 
 ## Demo Objectives
 
-* Demonstrate Redis Streams as the source event stream for a multi-consumer workflow
+* Demonstrate Redis Streams as the source event log for a multi-consumer workflow
 * Show fan-out from one `transactions` stream to multiple independent consumer groups
 * Highlight materialized analytics written directly into Redis data structures
 * Illustrate stateful processing that emits a derived `alerts` stream
-* Showcase lag, recovery, replay, and observability in one local demo
-* Demonstrate that the same pipeline can be fed through the Kafka protocol using [Korvet](https://github.com/redis-field-engineering/korvet-dist), without changing the consumers
+* Show consumer-group lag and recovery while the producer keeps publishing
+* Demonstrate that the **same workload runs over the Kafka protocol via Korvet with no code change beyond `bootstrap.servers`**, and compare its end-to-end latency to the Redis-native lane live
+
+## How It Works
+
+There are two lanes, and they never touch each other. That separation is deliberate: it lets you compare them fairly.
+
+```
+Lane A (native Redis Streams)
+  producer ──XADD──▶ "transactions" (Redis Stream) ──XREADGROUP──▶ metrics-cg  (analytics)
+                                                     │             alerts-cg   (derived "alerts" stream)
+                                                     │             monitor-cg  (dashboard)
+                                                     └──────────▶ probe-redis-cg (latency probe → lane "redis")
+
+Lane B (Kafka on Redis via Korvet)
+  kafka-producer ──Kafka protocol──▶ Korvet topic "kafka-transactions" ──Kafka consumer group──▶ kafka-probe
+                                     (stored as a Redis Stream)                                   (latency probe → lane "korvet")
+```
+
+Every event carries a producer `timestamp`. Each lane's probe computes end-to-end latency as `consume_time − timestamp`, then publishes samples, a per-second throughput gauge, and a running count into Redis. The `monitor-api` service reads both lanes and the dashboard renders them side by side.
+
+> Korvet is a Kafka-compatible broker that implements the Kafka wire protocol and stores each topic partition as a Redis Stream. Existing Kafka clients (and CLI tools like `kafka-console-producer`) connect to it exactly as they would to a Kafka broker — no Kafka cluster, no ZooKeeper/KRaft. In this demo the Korvet topic `kafka-transactions` is backed by the Redis stream `korvet:storage:local:kafka-transactions:0`.
 
 ## Setup
 
@@ -30,12 +59,10 @@ This demo showcases how Redis Streams can power a compact event-driven workflow 
 * Docker 24+
 * Docker Compose v2
 * A modern browser
-* Enough Docker resources to run Redis, Redis Insight, and the Java services comfortably
+* Enough Docker resources to run Redis, Redis Insight, Korvet, and the Java services comfortably
 
-### Configuration
-
-#### Running the demo locally
-This demo is self-contained and runs from the repository root using the provided `docker-compose.yml`. The Java services are built from the included `Dockerfile`, while the web dashboard is served separately from the `monitor-web` folder using Nginx. All services share a single Redis deployment so you can observe the stream, the derived stream, the consumer-group metadata, and the materialized analytics in one place.
+### Running the demo locally
+This demo runs from the repository root using the provided `docker-compose.yml`. The Java services are built from the included `Dockerfile`; the web dashboard is served separately from `monitor-web` using Nginx. Both lanes share a single Redis deployment (Korvet is backed by the same Redis), so you can inspect the streams, consumer groups, materialized analytics, and latency telemetry in one place.
 
 To start the full stack, open a terminal in the repository root and run:
 
@@ -43,26 +70,19 @@ To start the full stack, open a terminal in the repository root and run:
 docker compose up --build
 ```
 
-The first build compiles the Java application and assembles the container images, so it will take longer than subsequent runs.
+The first build compiles the Java application and assembles the container images, so it takes longer than subsequent runs.
 
-#### Demo configuration knobs
-This demo is configured through environment variables in `docker-compose.yml`. The most useful settings are:
+### Configuration knobs
+Configuration is via environment variables in `docker-compose.yml`. The most useful settings are:
 
-* `PRODUCER_RATE_PER_SECOND`, which controls how fast the producer writes to `transactions`
-* `METRICS_PROCESSING_DELAY_MS`, which adds a small delay to the metrics workers so lag and recovery remain visible during the demo
-* `MONITOR_API_PORT`, which controls the internal HTTP port used by `monitor-api`
+* `PRODUCER_RATE_PER_SECOND` on the `producer` and `kafka-producer` services — how fast each lane publishes (1–100)
+* `METRICS_PROCESSING_DELAY_MS` on the `metrics-*` services — a small artificial delay so lag and recovery stay visible during the demo
 
-If you change any of these values, rebuild the stack with:
-
-```bash
-docker compose up --build
-```
+After changing a value, rebuild with `docker compose up --build`.
 
 ## Running the Demo
 
-### Starting the full stack
-
-1. Open a terminal and navigate to the repository root.
+1. Open a terminal in the repository root.
 
 2. Start the demo:
 
@@ -72,15 +92,12 @@ docker compose up --build
 
 This will:
 
-* Start a Redis database on port `6379`
+* Start a Redis database, published on host port `6380` (still `6379` inside the compose network, so a Redis already running on your host's `6379` will not clash)
 * Start Redis Insight on port `5540`
 * Start Korvet, a Kafka-compatible broker backed by the same Redis, on port `9092`
 * Start a `kafka-tools` container with the standard Kafka CLI tools
-* Start `kafka-connect`, a Kafka Connect worker with the Redis sink connector that forwards events produced through the Kafka protocol into the native `transactions` stream
-* Start `connect-init`, a one-shot container that registers the sink connector and then exits
-* Start a transaction producer that continuously writes to the `transactions` stream
-* Start two metrics consumers in the `metrics-cg` consumer group
-* Start an alert consumer in the `alerts-cg` consumer group
+* **Lane A:** start the native `producer` (writes to the `transactions` stream), two `metrics` consumers (`metrics-cg`), an `alerts` consumer (`alerts-cg`), and a `redis-probe` latency probe (`probe-redis-cg`)
+* **Lane B:** start a `kafka-producer` (writes to the Korvet topic `kafka-transactions`) and a `kafka-probe` Kafka consumer group (`probe-korvet`)
 * Start the monitor API and the browser dashboard
 
 3. Verify the containers are running:
@@ -89,172 +106,123 @@ This will:
 docker compose ps
 ```
 
-You should see the following services:
+You should see: `redis-database`, `redis-insight`, `redis-korvet`, `kafka-tools`, `producer`, `metrics-1`, `metrics-2`, `alerts`, `redis-probe`, `kafka-producer`, `kafka-probe`, `monitor-api`, `monitor-web`.
 
-* `redis-database`
-* `redis-insight`
-* `redis-korvet`
-* `kafka-tools`
-* `kafka-connect`
-* `connect-init` (runs once, then exits — `docker compose ps -a` to see it)
-* `producer`
-* `metrics-1`
-* `metrics-2`
-* `alerts`
-* `monitor-api`
-* `monitor-web`
+4. Access the demo in your browser:
 
-4. Access the demo surfaces in your browser:
-
-* Redis Insight: `http://localhost:5540`
 * Web dashboard: `http://localhost:8088`
+* Redis Insight: `http://localhost:5540`
 
-Once the stack is up, the dashboard will begin polling the monitor API automatically and Redis Insight can be used to inspect streams and keys directly.
+Once the stack is up, the dashboard polls the monitor API automatically. Redis Insight can inspect streams and keys directly.
 
-To stop the demo when you are finished, run:
+To stop the demo:
 
 ```bash
 docker compose down
 ```
 
-### Observing the event flow
-This demo starts with a single source stream named `transactions`. The producer continuously appends synthetic transaction events to that stream. From there, three independent consumer groups process the same data for different purposes:
+## The Timing View
+The **End-to-end latency** panel at the top of the dashboard compares the two lanes. For each lane it shows:
 
-* `metrics-cg` materializes analytics into Redis strings, sorted sets, and JSON values
-* `alerts-cg` maintains rolling state and emits derived events into the `alerts` stream
-* `monitor-cg` powers the live web dashboard and exposes a JSON snapshot through `monitor-api`
+* **p50 / p95** — median and 95th-percentile end-to-end latency, produce → consume. Latency is recorded in microseconds; the dashboard shows µs when it is sub-millisecond (typical for the Redis Streams lane on one host) and ms otherwise
+* **throughput** — messages per second the probe is currently consuming
+* a comparison bar scaled to the higher p95, plus the running processed count
 
-The native pipeline owns an ordinary Redis Stream named `transactions`. The producer appends synthetic events there, and each entry stores the event as discrete fields (`txn_id`, `amount`, `category`, `region`, `risk_score`, `timestamp`). The consumers never reference Korvet; they just read `transactions`.
+Both lanes generate the same workload at the same rate, so the panel is an apples-to-apples comparison. In a typical run the Kafka-on-Redis lane tracks the Redis-native lane closely.
 
-Events produced through the Kafka protocol are merged in by **Kafka Connect** running the [Redis sink connector](https://github.com/redis-field-engineering/redis-kafka-connect). The sink consumes the `transactions` Kafka topic from Korvet and `XADD`s each record into the native `transactions` stream. Two in-pipeline transformations do the adaptation the native consumers need: a `ReplaceField` SMT renames `txnId`/`riskScore` to `txn_id`/`risk_score`, an `InsertField` SMT stamps the record timestamp, and `redis.type=STREAM` writes the JSON value out as discrete stream fields. This keeps the native producer and consumers Korvet-agnostic — the only Kafka/Korvet-aware piece is connector configuration, no custom code.
+> **Read the numbers honestly on stage.** Everything here runs on one host over the loopback interface, so all latencies are small and the comparison is *relative and functional*, not a benchmark. Korvet's published performance figures are stated design targets, and there is no official head-to-head against Apache Kafka — so let the live numbers speak rather than asserting a specific figure. For real load testing, Korvet ships a `load-testing` sample with Prometheus and Grafana.
 
-To inspect the flow directly, open Redis Insight and look at:
-
-* Stream `transactions` (the native event log the consumers read)
-* Stream `korvet:storage:local:transactions:0` (Korvet's store for the Kafka topic; the source the sink connector consumes)
-* Stream `alerts`
-* Key `metrics:total_count`
-* Key `metrics:total_volume`
-* Key `metrics:high_risk_count`
-* Key `metrics:volume_by_category`
-* Key `metrics:count_by_region`
-
-If you prefer command-line inspection, run the following from any Redis command runner:
-
-```redis
-XLEN transactions
-XINFO STREAM transactions
-XINFO GROUPS transactions
-XRANGE transactions - + COUNT 5
-XRANGE alerts - + COUNT 5
-GET metrics:total_count
-GET metrics:total_volume
-GET metrics:high_risk_count
-ZREVRANGE metrics:volume_by_category 0 -1 WITHSCORES
-JSON.GET metrics:count_by_region
-```
-
-### Demonstrating lag and recovery
-One of the main goals of this demo is to show that consumer groups can fall behind and recover independently while the producer continues to publish. The simplest way to show this is by stopping one metrics worker:
+## Demonstrating Lag and Recovery
+One goal of Lane A is to show that consumer groups fall behind and recover independently while the producer keeps publishing. Stop one metrics worker:
 
 ```bash
 docker compose stop metrics-2
 ```
 
-After a short pause, the dashboard should show fewer active metrics consumers and rising metrics lag. The `transactions` stream will keep growing because the producer is still running, and the remaining metrics worker will continue processing at a slower rate.
+After a short pause the dashboard shows fewer active metrics consumers and a rising **Metrics Backlog (entries)** count (this is the consumer-group backlog — a count of unread entries, not a latency). The `transactions` stream keeps growing because the producer is still running, and the remaining worker processes at a slower rate.
 
-To bring the second worker back, run:
+Bring the worker back:
 
 ```bash
 docker compose start metrics-2
 ```
 
-The lag should begin draining and the dashboard should return to two metrics consumers.
+The backlog drains and the dashboard returns to two metrics consumers.
 
-If you want to show isolation between consumer groups, you can stop the monitor backend independently:
+To show isolation between consumer groups, stop the monitor backend independently — `monitor-cg` falls behind temporarily while `metrics-cg` and `alerts-cg` keep processing:
 
 ```bash
 docker compose stop monitor-api
 docker compose start monitor-api
 ```
 
-This causes `monitor-cg` to fall behind temporarily while `metrics-cg` and `alerts-cg` continue processing without interruption.
+## Lane B: The Kafka Protocol via Korvet
+Lane B runs continuously alongside Lane A — `kafka-producer` and `kafka-probe` are standard Kafka client applications whose only broker is Korvet. Nothing about them is Redis-aware except the fact that, under the hood, Korvet stores their topic as a Redis Stream.
 
-### Sending events through the Kafka protocol (Korvet)
-The whole demo so far has been pure Redis Streams: a native producer appends to the `transactions` stream, and native consumer groups read from it. The final act shows that the very same pipeline can be fed through the Kafka protocol instead, with no changes to the consumers or the dashboard.
-
-This works because [Korvet](https://github.com/redis-field-engineering/korvet-dist) is a Kafka-compatible broker that stores each Kafka topic partition as a Redis Stream, and **Kafka Connect** (with the [Redis sink connector](https://github.com/redis-field-engineering/redis-kafka-connect)) moves those records into the native `transactions` stream. The `kafka-connect` worker runs the sink connector — registered once by `connect-init` — which consumes the `transactions` topic from Korvet and `XADD`s each record into the `transactions` Redis stream. The connector's JSON converter plus a `ReplaceField` and an `InsertField` SMT turn the Kafka record into the exact discrete fields the native consumers expect, so a Kafka-produced event arrives in the pipeline identical in shape to what the native producer writes — with no custom glue code.
-
-First, stop the native producer so the only new events are the ones you send via Kafka:
-
-```bash
-docker compose stop producer
-```
-
-The `transactions` topic does not need to be created by hand. The `redis-korvet` service is configured to auto-create it with a single partition (`KORVET_TOPICS_0_*` in `docker-compose.yml`). Korvet creates topics **lazily** — on the first produce, not at server startup — so listing topics before you produce shows nothing; that is expected, not a failure. The single partition guarantees every message lands in partition `0` (`korvet:storage:local:transactions:0`), the stream the sink connector consumes.
-
-Produce events with the standard Kafka console producer and watch the dashboard at `http://localhost:8088` update — the first produce creates the topic, and the metrics, alerts, and recent-transaction views all advance from Kafka-sent data:
+To make the point live, you can also produce to the same topic by hand with the stock Kafka console producer and watch the Korvet lane's throughput and latency react on the dashboard:
 
 ```bash
 docker compose exec kafka-tools /opt/kafka/bin/kafka-console-producer.sh \
   --bootstrap-server redis-korvet:9092 \
-  --topic transactions \
-  --command-property enable.idempotence=false
+  --topic kafka-transactions
 ```
 
-Then paste one JSON event per line (press Enter after each). Use the demo's own categories (`payroll`, `wire`, `pos`, `ach`, `internal`) and regions (`northeast`, `southeast`, `west`, `midwest`) so the analytics and alerts react as expected:
+Then paste one JSON event per line (press Enter after each). The `timestamp` must be a **current** epoch-milliseconds value so the latency probe measures a small, realistic delay — a stale timestamp is treated as a backlog outlier and excluded from the latency percentiles (see `LATENCY_MAX_SAMPLE_MS`). Get the current value with `date +%s%3N` and substitute it. Use the demo's categories (`payroll`, `wire`, `pos`, `ach`, `internal`) and regions (`northeast`, `southeast`, `west`, `midwest`):
 
 ```json
-{"txnId":"TXN-kafka01","amount":48500.00,"category":"wire","region":"southeast","riskScore":93}
-{"txnId":"TXN-kafka02","amount":250.00,"category":"pos","region":"west","riskScore":12}
-{"txnId":"TXN-kafka03","amount":15750.00,"category":"internal","region":"northeast","riskScore":88}
+{"txn_id":"TXN-cli01","amount":"48500.00","category":"wire","region":"southeast","risk_score":"93","timestamp":"<current-epoch-ms>"}
+{"txn_id":"TXN-cli02","amount":"250.00","category":"pos","region":"west","risk_score":"12","timestamp":"<current-epoch-ms>"}
 ```
 
-You can omit the `timestamp` field — the `InsertField` SMT stamps each record with its Kafka record timestamp, so the `transactions` entry always carries one. A `riskScore` above `80` counts as high risk, so the first and third events above increment the high-risk metric.
-
-Once you have produced at least one event, the topic exists — confirm it (and its single partition) with:
+Confirm the topic and its single partition:
 
 ```bash
 docker compose exec kafka-tools /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server redis-korvet:9092 --describe --topic transactions
+  --bootstrap-server redis-korvet:9092 --describe --topic kafka-transactions
 ```
 
-To confirm the Kafka path, inspect both streams. Korvet's stream holds what you produced over Kafka; the native `transactions` stream holds the records the sink connector forwarded (one per event):
+> Korvet creates topics lazily on first produce, so listing topics before any message is sent shows nothing — that is expected. This demo also sets `KORVET_STORAGE_LOCAL_COMPRESSION_CODEC=none` so the stored value stays plain JSON you can read directly in Redis Insight.
 
-```bash
-docker compose exec redis-database redis-cli XRANGE korvet:storage:local:transactions:0 - + COUNT 5
-docker compose exec redis-database redis-cli XREVRANGE transactions + - COUNT 5
+## Inspecting State in Redis Insight
+Open Redis Insight (`http://localhost:5540`) and look at:
+
+* Stream `transactions` — the native (Lane A) event log
+* Stream `korvet:storage:local:kafka-transactions:0` — Korvet's backing store for the Lane B topic
+* Stream `alerts` — the derived alert events
+* `metrics:total_count`, `metrics:total_volume`, `metrics:high_risk_count`
+* `metrics:volume_by_category` (sorted set), `metrics:count_by_region` (JSON)
+* `latency:samples:redis` / `latency:samples:korvet` — recent latency samples per lane (microseconds)
+* `latency:rate:redis` / `latency:rate:korvet` — current per-second throughput per lane
+
+Command-line inspection from any Redis runner:
+
+```redis
+XLEN transactions
+XINFO GROUPS transactions
+XRANGE transactions - + COUNT 5
+XRANGE korvet:storage:local:kafka-transactions:0 - + COUNT 5
+LRANGE latency:samples:redis 0 9
+LRANGE latency:samples:korvet 0 9
 ```
-
-Korvet's stream shows a single `value` field holding the JSON you sent; the `transactions` entries show the discrete fields (`txn_id`, `amount`, `category`, …) the connector produced from it. Entries in `transactions` carry their own stream entry IDs (the sink appends them), which is expected — the connector copies records rather than sharing the physical entry, the price of keeping the two systems decoupled. You can also watch the connector work: `docker compose logs --tail=20 kafka-connect`.
-
-> A note on readability: Korvet compresses the stored `value` with LZ4 by default. This demo sets `KORVET_STORAGE_LOCAL_COMPRESSION_CODEC=none` on the `redis-korvet` service so the value stays plain JSON you can read directly in Redis Insight. (The connector itself doesn't depend on this — Kafka clients receive decompressed data over the protocol regardless.)
-
-## Architecture
-At a high level, the architecture consists of one producer, three independent consumer groups, one derived stream, and a browser dashboard backed by a dedicated monitor API. Redis serves as the stream platform, the state store for alerts, the analytics store for metrics, and the metadata source for consumer-group observability. The native producer and consumers work entirely against the demo's own `transactions` stream and have no knowledge of Korvet.
-
-Alongside these, Korvet runs as a Kafka-compatible broker over the same Redis, so the event log can also be fed through the Kafka protocol. Korvet stores Kafka topics in its own keyspace; **Kafka Connect** with the [Redis sink connector](https://github.com/redis-field-engineering/redis-kafka-connect) consumes the `transactions` topic and writes each record into the demo's `transactions` stream, with SMTs adapting the field names and the `STREAM` type exploding the JSON value into discrete fields. Connect is the single point of contact between the two worlds — standard, configuration-only tooling rather than custom code — which keeps the native pipeline decoupled from Korvet's internal storage layout. The trade-off is that forwarded events are copies (new entry IDs) rather than the same physical Redis entry.
-
-![architecture.png](images/architecture.png)
 
 ## Known Issues
 
 * Redis Insight may not connect automatically. If that happens, add `redis-database:6379` manually from the Redis Insight UI.
-* The first `docker compose up --build` can take a bit longer because the Java application must be compiled and the images must be built.
-* This is a demo workload with synthetic data and intentionally simplified operational behavior. It is designed to illustrate stream patterns, not to serve as a production reference architecture.
-* If the web dashboard is not updating, inspect the monitor service logs with `docker compose logs --tail=100 monitor-api`.
-* If metrics are not changing, inspect the worker logs with `docker compose logs --tail=100 metrics-1` and `docker compose logs --tail=100 metrics-2`.
-* If Kafka-produced events do not reach the dashboard, check that the sink connector registered and is running: `curl -s http://localhost:8083/connectors/redis-transactions-sink/status` (or `docker compose logs --tail=100 kafka-connect`). Also confirm `connect-init` exited 0 (`docker compose ps -a`) and that the `transactions` topic has one partition (`kafka-topics.sh --describe`).
+* The first `docker compose up --build` takes longer because the Java application must be compiled and the images built.
+* This is a demo workload with synthetic data and intentionally simplified operational behavior. It illustrates stream patterns and a transport comparison; it is not a production reference architecture or a benchmark.
+* If the web dashboard is not updating, inspect the monitor logs: `docker compose logs --tail=100 monitor-api`.
+* If the Kafka lane shows no latency data, check the Kafka client logs: `docker compose logs --tail=100 kafka-producer` and `docker compose logs --tail=100 kafka-probe`, and confirm `redis-korvet` is healthy (`docker compose ps`).
+* `MONITOR_API_PORT` is fixed at `8080` in this demo: the Nginx dashboard proxies to `monitor-api:8080` (`monitor-web/nginx.conf`), so changing it requires editing the compose port mapping, the healthcheck, and `nginx.conf` together.
 
 ## Resources
 
-* `docker-compose.yml` for the service topology
-* `src/main/java/io/redis/devrel/demo/eda/producer` for the transaction producer
-* `src/main/java/io/redis/devrel/demo/eda/consumer` for the metrics and alerts consumers
-* `src/main/java/io/redis/devrel/demo/eda/web` for the monitor API
-* [redis-kafka-connect](https://github.com/redis-field-engineering/redis-kafka-connect) for the Redis Kafka Connect sink connector, configured under the `kafka-connect` / `connect-init` services in `docker-compose.yml`
-* `monitor-web` for the browser dashboard
-* [Korvet](https://github.com/redis-field-engineering/korvet-dist) for the Kafka-compatible broker backed by Redis Streams, and its [Kafka CLI sample](https://github.com/redis-field-engineering/korvet-dist/tree/main/samples/kafka-cli)
+* `docker-compose.yml` — the service topology for both lanes
+* `src/main/java/io/redis/devrel/demo/eda/producer` — the native and Kafka transaction producers
+* `src/main/java/io/redis/devrel/demo/eda/consumer` — the metrics and alerts consumers
+* `src/main/java/io/redis/devrel/demo/eda/probe` — the two latency probes (`RedisLatencyProbe`, `KafkaLatencyProbe`) and shared `LatencyRecorder`
+* `src/main/java/io/redis/devrel/demo/eda/web` — the monitor API
+* `monitor-web` — the browser dashboard
+* [Korvet](https://github.com/redis-field-engineering/korvet-dist) — the Kafka-compatible broker backed by Redis Streams, and its [Kafka CLI sample](https://github.com/redis-field-engineering/korvet-dist/tree/main/samples/kafka-cli)
 
 ## Maintainers
 * Ricardo Ferreira — [@riferrei](https://github.com/riferrei)

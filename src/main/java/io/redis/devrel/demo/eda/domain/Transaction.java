@@ -6,7 +6,8 @@ public record Transaction(
         String category,
         String region,
         int riskScore,
-        long timestamp
+        long timestamp,
+        long producedMicros
 ) {
     public boolean isHighRisk() {
         return riskScore > 80;

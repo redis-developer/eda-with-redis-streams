@@ -30,6 +30,10 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.redis.devrel.demo.eda.domain.Constants.ALERTS_STREAM_KEY;
+import static io.redis.devrel.demo.eda.domain.Constants.LATENCY_LANES;
+import static io.redis.devrel.demo.eda.domain.Constants.latencyCountKey;
+import static io.redis.devrel.demo.eda.domain.Constants.latencyRateKey;
+import static io.redis.devrel.demo.eda.domain.Constants.latencySamplesKey;
 import static io.redis.devrel.demo.eda.domain.Constants.METRICS_COUNT_BY_REGION_KEY;
 import static io.redis.devrel.demo.eda.domain.Constants.METRICS_GROUP_NAME;
 import static io.redis.devrel.demo.eda.domain.Constants.METRICS_HIGH_RISK_COUNT_KEY;
@@ -271,9 +275,54 @@ public final class MonitorApiServer {
                             loadRegionCounts(jedis)
                     ),
                     monitorState.snapshot(),
-                    loadAlerts(jedis)
+                    loadAlerts(jedis),
+                    loadLanes(jedis)
             );
         }
+    }
+
+    private List<LaneLatency> loadLanes(UnifiedJedis jedis) {
+        List<LaneLatency> lanes = new ArrayList<>();
+        for (String lane : LATENCY_LANES) {
+            List<String> rawSamples = jedis.lrange(latencySamplesKey(lane), 0, -1);
+            long[] samples = rawSamples.stream()
+                    .filter(value -> value != null && !value.isBlank())
+                    .mapToLong(value -> parseLong(value))
+                    .sorted()
+                    .toArray();
+
+            lanes.add(new LaneLatency(
+                    lane,
+                    percentile(samples, 0.50),
+                    percentile(samples, 0.95),
+                    samples.length == 0 ? 0L : samples[samples.length - 1],
+                    average(samples),
+                    parseLong(jedis.get(latencyRateKey(lane))),
+                    parseLong(jedis.get(latencyCountKey(lane))),
+                    samples.length
+            ));
+        }
+        return lanes;
+    }
+
+    private static long percentile(long[] sortedSamples, double quantile) {
+        if (sortedSamples.length == 0) {
+            return 0L;
+        }
+        int index = (int) Math.ceil(quantile * sortedSamples.length) - 1;
+        index = Math.max(0, Math.min(index, sortedSamples.length - 1));
+        return sortedSamples[index];
+    }
+
+    private static double average(long[] samples) {
+        if (samples.length == 0) {
+            return 0.0d;
+        }
+        long total = 0L;
+        for (long sample : samples) {
+            total += sample;
+        }
+        return Math.round((double) total / samples.length * 10.0) / 10.0;
     }
 
     private List<StreamGroupInfo> loadGroupInfo(UnifiedJedis jedis) {
@@ -474,7 +523,20 @@ public final class MonitorApiServer {
             StreamSummary streams,
             MetricsSummary metrics,
             List<TransactionView> transactions,
-            List<AlertView> alerts
+            List<AlertView> alerts,
+            List<LaneLatency> lanes
+    ) {
+    }
+
+    private record LaneLatency(
+            String lane,
+            long p50Micros,
+            long p95Micros,
+            long maxMicros,
+            double avgMicros,
+            long ratePerSecond,
+            long totalProcessed,
+            int sampleCount
     ) {
     }
 
